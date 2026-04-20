@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.key
+*.pem
+*.crt
+.dxt-build/
+.DS_Store

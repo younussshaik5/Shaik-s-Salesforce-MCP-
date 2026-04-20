@@ -1,0 +1,91 @@
+{
+  "dxt_version": "0.1",
+  "name": "salesforce-mcp",
+  "display_name": "Salesforce for Claude",
+  "version": "1.0.0",
+  "description": "Connect Claude Desktop to your Salesforce org. Query records, run reports, manage approvals, invoke Flows — all in plain English. No code required.",
+  "author": {
+    "name": "Your Company",
+    "email": "support@yourcompany.com"
+  },
+  "license": "MIT",
+  "keywords": ["salesforce", "crm", "sales", "reports", "data"],
+
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {
+        "SF_AUTH_MODE": "password",
+        "SF_LOGIN_URL": "${user_config.login_url}",
+        "SF_CLIENT_ID": "${user_config.client_id}",
+        "SF_CLIENT_SECRET": "${user_config.client_secret}",
+        "SF_USERNAME": "${user_config.username}",
+        "SF_PASSWORD": "${user_config.password}",
+        "SF_SECURITY_TOKEN": "${user_config.security_token}",
+        "SF_API_VERSION": "v60.0"
+      }
+    }
+  },
+
+  "user_config": {
+    "login_url": {
+      "type": "string",
+      "title": "Salesforce environment",
+      "description": "Production or Sandbox?",
+      "enum": [
+        "https://login.salesforce.com",
+        "https://test.salesforce.com"
+      ],
+      "default": "https://login.salesforce.com",
+      "required": true
+    },
+    "username": {
+      "type": "string",
+      "title": "Your Salesforce username",
+      "description": "The email address you use to log into Salesforce",
+      "required": true
+    },
+    "password": {
+      "type": "string",
+      "title": "Your Salesforce password",
+      "description": "Stored securely in your system keychain — never in plain text",
+      "sensitive": true,
+      "required": true
+    },
+    "security_token": {
+      "type": "string",
+      "title": "Security token",
+      "description": "Optional. Find it in Salesforce: My Settings → Reset My Security Token. Leave blank if your office IP is whitelisted.",
+      "sensitive": true,
+      "required": false,
+      "default": ""
+    },
+    "client_id": {
+      "type": "string",
+      "title": "Connected App Consumer Key",
+      "description": "From Salesforce Setup → App Manager → your Connected App",
+      "sensitive": true,
+      "required": true
+    },
+    "client_secret": {
+      "type": "string",
+      "title": "Connected App Consumer Secret",
+      "description": "Stored securely in your system keychain",
+      "sensitive": true,
+      "required": true
+    }
+  },
+
+  "tools_generated": true,
+
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "win32"],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}
