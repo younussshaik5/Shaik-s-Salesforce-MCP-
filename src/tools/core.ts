@@ -1,3 +1,4 @@
+import { toolHandler, ok } from "../utils/errors.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SalesforceClient } from "../services/salesforce-client.js";
 import {
@@ -53,10 +54,7 @@ Tips:
       const result = fetch_all
         ? await client.queryAll(soql)
         : await client.query(soql);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -83,10 +81,7 @@ Examples:
     },
     async ({ sosl }) => {
       const result = await client.search(sosl);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -112,10 +107,7 @@ Examples:
     },
     async ({ sobject, id, fields }) => {
       const record = await client.getRecord(sobject, id, fields);
-      return {
-        content: [{ type: "text", text: JSON.stringify(record, null, 2) }],
-        structuredContent: record,
-      };
+      return ok(record);
     }
   );
 
@@ -143,10 +135,7 @@ Tip: Use sf_describe_object first to know which fields are required.`,
     },
     async ({ sobject, data }) => {
       const result = await client.createRecord(sobject, data);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -230,10 +219,7 @@ Example:
     },
     async ({ sobject, external_id_field, external_id, data }) => {
       const result = await client.upsertRecord(sobject, external_id_field, external_id, data);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -260,10 +246,7 @@ Example:
     },
     async ({ sobject, records }) => {
       const result = await client.bulkCreateRecords(sobject, records);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -293,10 +276,7 @@ Examples:
       const result = include_fields
         ? describe
         : { ...describe, fields: undefined };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -331,10 +311,7 @@ Examples:
         );
       }
       const result = { count: objects.length, objects };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 }

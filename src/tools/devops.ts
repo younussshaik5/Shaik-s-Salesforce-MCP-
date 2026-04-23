@@ -1,3 +1,4 @@
+import { toolHandler, ok } from "../utils/errors.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { SalesforceClient } from "../services/salesforce-client.js";
@@ -90,10 +91,7 @@ Status values: Queued → InProgress → Succeeded | Failed | Canceled | Succeed
     },
     async ({ deploy_id }) => {
       const result = await client.getDeployStatus(deploy_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -159,10 +157,7 @@ Returns: Status and, when Succeeded, a zipFile (base64) containing all retrieved
     },
     async ({ retrieve_id }) => {
       const result = await client.getRetrieveStatus(retrieve_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -189,10 +184,7 @@ Use sf_list_permission_sets to find valid permission set names.`,
     },
     async ({ user_id, permission_set_name }) => {
       const result = await client.assignPermissionSet({ userId: user_id, permissionSetName: permission_set_name });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -213,10 +205,7 @@ Returns: Success confirmation.`,
     },
     async ({ user_id, permission_set_name }) => {
       const result = await client.revokePermissionSet({ userId: user_id, permissionSetName: permission_set_name });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -239,10 +228,7 @@ If CLI is not installed, returns installation instructions and the current conne
     },
     async () => {
       const result = await client.listAllOrgs();
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -281,10 +267,7 @@ Example:
         definitionFile: definition_file,
         noNamespace: no_namespace,
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -307,10 +290,7 @@ Args:
     async ({ alias_or_username }) => {
       if (!alias_or_username) return { content: [{ type: "text", text: JSON.stringify({ error: "alias_or_username is required" }) }] };
       const result = await client.deleteScratchOrg(alias_or_username);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -330,10 +310,7 @@ Returns: Login URL for the org.`,
     },
     async ({ alias_or_username }) => {
       const result = await client.openOrg(alias_or_username);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 }

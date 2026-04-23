@@ -1,3 +1,4 @@
+import { toolHandler, ok } from "../utils/errors.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { SalesforceClient } from "../services/salesforce-client.js";
@@ -56,10 +57,7 @@ Examples:
         records,
         externalIdFieldName: external_id_field,
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -87,10 +85,7 @@ When state = JobComplete:
     },
     async ({ job_id, job_type }) => {
       const result = await client.getBulkJobStatus(job_id, job_type);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -110,10 +105,7 @@ Returns: All bulk jobs with ID, object, operation, state, record counts, and dat
     },
     async ({ job_type }) => {
       const result = await client.listBulkJobs(job_type);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -147,10 +139,7 @@ Workflow:
         resultType: result_type,
         maxRecords: max_records,
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -171,10 +160,7 @@ Args:
     },
     async ({ job_id }) => {
       const result = await client.bulkIngestAbort(job_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -217,10 +203,7 @@ Examples:
         pollIntervalSeconds: poll_interval_seconds,
         maxPollSeconds: max_poll_seconds,
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -254,10 +237,7 @@ Pagination pattern:
         maxRecords: max_records,
         locator,
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -285,10 +265,7 @@ Useful for verifying which org and auth method the MCP is currently using.`,
           ? "JWT Bearer Token — passwordless, production-grade server-to-server auth. Token auto-refreshes."
           : "Username + Password OAuth — suitable for development. Enable in Connected App policies.",
       };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 }

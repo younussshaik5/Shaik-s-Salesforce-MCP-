@@ -55945,12 +55945,19 @@ var import_jsonwebtoken = __toESM(require_jsonwebtoken());
 var SalesforceClient = class {
   constructor(config3) {
     this.auth = null;
+    this.authPromise = null;
+    // mutex — prevent concurrent auth
+    // Axios timeout: 30s for normal calls, 120s for bulk/deploy
+    this.TIMEOUT_MS = 3e4;
+    this.BULK_TIMEOUT_MS = 12e4;
     this.config = config3;
   }
   // ─── Auth: Password Flow ───────────────────────────────────────────────────
   async authenticatePassword() {
     if (!this.config.clientSecret || !this.config.password) {
-      throw new Error("Password auth requires SF_CLIENT_SECRET and SF_PASSWORD");
+      throw new Error(
+        "Password auth requires SF_CLIENT_SECRET and SF_PASSWORD.\nAlso ensure: Salesforce Setup \u2192 OAuth and OpenID Connect Settings \u2192 Allow OAuth Username-Password Flows is ON."
+      );
     }
     const params = {
       grant_type: "password",
@@ -55959,12 +55966,19 @@ var SalesforceClient = class {
       username: this.config.username,
       password: this.config.password + (this.config.securityToken ?? "")
     };
-    const response = await axios_default.post(
-      `${this.config.loginUrl}/services/oauth2/token`,
-      import_qs.default.stringify(params),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-    );
-    this.setAuth(response.data);
+    try {
+      const response = await axios_default.post(
+        `${this.config.loginUrl}/services/oauth2/token`,
+        import_qs.default.stringify(params),
+        {
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          timeout: this.TIMEOUT_MS
+        }
+      );
+      this.setAuth(response.data);
+    } catch (err) {
+      throw this.formatAuthError(err);
+    }
   }
   // ─── Auth: JWT Bearer Flow ─────────────────────────────────────────────────
   async authenticateJWT() {
@@ -55972,10 +55986,22 @@ var SalesforceClient = class {
     if (this.config.privateKey) {
       privateKey = this.config.privateKey.replace(/\\n/g, "\n");
     } else if (this.config.privateKeyFile) {
-      privateKey = import_fs.default.readFileSync(this.config.privateKeyFile, "utf8");
+      const keyPath = this.config.privateKeyFile.replace(/\\/g, "/");
+      if (!import_fs.default.existsSync(keyPath)) {
+        throw new Error(
+          `Private key file not found: ${keyPath}
+Set SF_PRIVATE_KEY_FILE to the absolute path of your .key or .pem file.`
+        );
+      }
+      privateKey = import_fs.default.readFileSync(keyPath, "utf8");
     } else {
       throw new Error(
-        "JWT auth requires SF_PRIVATE_KEY (PEM string) or SF_PRIVATE_KEY_FILE (path to .key/.pem)"
+        "JWT auth requires SF_PRIVATE_KEY (PEM string) or SF_PRIVATE_KEY_FILE (path to .key/.pem)\n\nGenerate a key pair:\n  openssl genrsa -out server.key 2048\n  openssl req -new -x509 -key server.key -out server.crt -days 3650\nUpload server.crt to your Connected App \u2192 Use digital signatures."
+      );
+    }
+    if (!privateKey.includes("-----BEGIN")) {
+      throw new Error(
+        "Private key does not appear to be a valid PEM file. It should start with -----BEGIN RSA PRIVATE KEY----- or -----BEGIN PRIVATE KEY-----"
       );
     }
     const now = Math.floor(Date.now() / 1e3);
@@ -55984,26 +56010,66 @@ var SalesforceClient = class {
       sub: this.config.username,
       aud: this.config.loginUrl,
       exp: now + 300
-      // 5 min expiry (Salesforce max)
     };
-    const signedJwt = import_jsonwebtoken.default.sign(claim, privateKey, { algorithm: "RS256" });
-    const params = {
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion: signedJwt
-    };
-    const response = await axios_default.post(
-      `${this.config.loginUrl}/services/oauth2/token`,
-      import_qs.default.stringify(params),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-    );
-    this.setAuth(response.data);
+    let signedJwt;
+    try {
+      signedJwt = import_jsonwebtoken.default.sign(claim, privateKey, { algorithm: "RS256" });
+    } catch (err) {
+      throw new Error(
+        `Failed to sign JWT: ${err instanceof Error ? err.message : String(err)}
+Ensure your private key is a valid RSA key (2048-bit minimum).`
+      );
+    }
+    try {
+      const response = await axios_default.post(
+        `${this.config.loginUrl}/services/oauth2/token`,
+        import_qs.default.stringify({
+          grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+          assertion: signedJwt
+        }),
+        {
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          timeout: this.TIMEOUT_MS
+        }
+      );
+      this.setAuth(response.data);
+    } catch (err) {
+      throw this.formatAuthError(err);
+    }
   }
-  // ─── Auth: Token Refresh ───────────────────────────────────────────────────
-  // JWT tokens expire after ~2 hours. Auto-refresh if within 5 min of expiry.
+  // ─── Auth error messages ───────────────────────────────────────────────────
+  formatAuthError(err) {
+    if (axios_default.isAxiosError(err)) {
+      const data = err.response?.data;
+      const code = data?.error ?? "";
+      const desc = data?.error_description ?? err.message;
+      const hints = {
+        invalid_client: "Consumer Key (SF_CLIENT_ID) is wrong. Check your Connected App in Salesforce Setup \u2192 App Manager.",
+        invalid_client_credentials: "Consumer Key or Secret is wrong. Check SF_CLIENT_ID and SF_CLIENT_SECRET.",
+        invalid_grant: "Wrong username, password, or security token. Also check: Setup \u2192 OAuth and OpenID Connect Settings \u2192 Allow OAuth Username-Password Flows is ON.",
+        unsupported_grant_type: "Username-Password flow is not enabled. Go to Salesforce Setup \u2192 OAuth and OpenID Connect Settings \u2192 Allow OAuth Username-Password Flows \u2192 ON.",
+        inactive_user: "This Salesforce user is inactive. Activate the user in Setup \u2192 Users.",
+        inactive_org: "This Salesforce org is inactive or suspended."
+      };
+      const hint = hints[code] ?? "";
+      return new Error(
+        `Salesforce authentication failed: ${desc}${hint ? `
+
+Fix: ${hint}` : ""}`
+      );
+    }
+    if (err instanceof Error && err.message.includes("ENOTFOUND")) {
+      return new Error(
+        `Cannot reach ${this.config.loginUrl}. Check your internet connection and SF_LOGIN_URL.
+For sandbox orgs use https://test.salesforce.com, for production use https://login.salesforce.com`
+      );
+    }
+    return err instanceof Error ? err : new Error(String(err));
+  }
+  // ─── Token management ──────────────────────────────────────────────────────
   isTokenExpiring() {
     if (!this.auth) return true;
-    const fiveMinFromNow = Date.now() + 5 * 60 * 1e3;
-    return this.auth.expiresAt < fiveMinFromNow;
+    return this.auth.expiresAt < Date.now() + 5 * 60 * 1e3;
   }
   setAuth(data) {
     this.auth = {
@@ -56011,26 +56077,97 @@ var SalesforceClient = class {
       instanceUrl: data.instance_url,
       tokenType: data.token_type,
       expiresAt: Date.now() + 2 * 60 * 60 * 1e3
-      // 2 hours default
+      // 2h default
     };
     this.http = axios_default.create({
       baseURL: `${this.auth.instanceUrl}/services/data/${this.config.apiVersion}`,
       headers: {
         Authorization: `Bearer ${this.auth.accessToken}`,
         "Content-Type": "application/json"
-      }
+      },
+      timeout: this.TIMEOUT_MS
     });
   }
   async authenticate() {
-    if (this.config.authMode === "jwt") {
-      await this.authenticateJWT();
-    } else {
-      await this.authenticatePassword();
+    if (this.authPromise) {
+      await this.authPromise;
+      return;
     }
+    this.authPromise = (this.config.authMode === "jwt" ? this.authenticateJWT() : this.authenticatePassword()).finally(() => {
+      this.authPromise = null;
+    });
+    await this.authPromise;
   }
   async ensureAuth() {
     if (!this.auth || this.isTokenExpiring()) {
       await this.authenticate();
+    }
+  }
+  // ─── HTTP with auto-retry on 401 ──────────────────────────────────────────
+  // If a token expires mid-session, refresh once and retry the request.
+  async httpGet(url2, params, timeout) {
+    await this.ensureAuth();
+    try {
+      const response = await this.http.get(url2, {
+        params,
+        ...timeout ? { timeout } : {}
+      });
+      return response.data;
+    } catch (err) {
+      if (axios_default.isAxiosError(err) && err.response?.status === 401) {
+        this.auth = null;
+        await this.authenticate();
+        const response = await this.http.get(url2, { params });
+        return response.data;
+      }
+      throw err;
+    }
+  }
+  async httpPost(url2, body, headers, timeout) {
+    await this.ensureAuth();
+    try {
+      const response = await this.http.post(url2, body, {
+        ...headers ? { headers } : {},
+        ...timeout ? { timeout } : {}
+      });
+      return response.data;
+    } catch (err) {
+      if (axios_default.isAxiosError(err) && err.response?.status === 401) {
+        this.auth = null;
+        await this.authenticate();
+        const response = await this.http.post(url2, body, headers ? { headers } : {});
+        return response.data;
+      }
+      throw err;
+    }
+  }
+  async httpPatch(url2, body) {
+    await this.ensureAuth();
+    try {
+      const response = await this.http.patch(url2, body);
+      return response.data;
+    } catch (err) {
+      if (axios_default.isAxiosError(err) && err.response?.status === 401) {
+        this.auth = null;
+        await this.authenticate();
+        const response = await this.http.patch(url2, body);
+        return response.data;
+      }
+      throw err;
+    }
+  }
+  async httpDelete(url2) {
+    await this.ensureAuth();
+    try {
+      await this.http.delete(url2);
+    } catch (err) {
+      if (axios_default.isAxiosError(err) && err.response?.status === 401) {
+        this.auth = null;
+        await this.authenticate();
+        await this.http.delete(url2);
+        return;
+      }
+      throw err;
     }
   }
   getInstanceUrl() {
@@ -56041,1317 +56178,141 @@ var SalesforceClient = class {
   }
   // ─── SOQL Query ────────────────────────────────────────────────────────────
   async query(soql) {
-    await this.ensureAuth();
     try {
-      const response = await this.http.get("/query", {
-        params: { q: soql }
-      });
-      return response.data;
+      return await this.httpGet("/query", { q: soql });
     } catch (err) {
       throw this.formatError(err, "SOQL query");
     }
   }
   async queryAll(soql, maxRecords = 2e3) {
-    await this.ensureAuth();
     const first = await this.query(soql);
     let allRecords = [...first.records];
     let nextUrl = first.nextRecordsUrl;
     while (nextUrl && allRecords.length < maxRecords) {
-      const resp = await this.http.get(nextUrl);
-      allRecords = allRecords.concat(resp.data.records);
-      nextUrl = resp.data.nextRecordsUrl;
+      try {
+        const resp = await this.httpGet(nextUrl);
+        allRecords = allRecords.concat(resp.records);
+        nextUrl = resp.nextRecordsUrl;
+      } catch {
+        break;
+      }
     }
-    return { ...first, records: allRecords, done: !nextUrl };
+    return { ...first, records: allRecords.slice(0, maxRecords), done: !nextUrl };
   }
   // ─── SOSL Search ───────────────────────────────────────────────────────────
   async search(sosl) {
-    await this.ensureAuth();
     try {
-      const response = await this.http.get("/search", {
-        params: { q: sosl }
-      });
-      return response.data;
+      return await this.httpGet("/search", { q: sosl });
     } catch (err) {
       throw this.formatError(err, "SOSL search");
     }
   }
   // ─── CRUD ──────────────────────────────────────────────────────────────────
   async getRecord(sobject, id, fields) {
-    await this.ensureAuth();
+    if (!/^[a-zA-Z0-9]{15,18}$/.test(id)) {
+      throw new Error(`Invalid record ID: "${id}". Salesforce IDs are 15 or 18 alphanumeric characters.`);
+    }
     try {
-      const url2 = `/sobjects/${sobject}/${id}`;
-      const params = fields ? { fields: fields.join(",") } : {};
-      const response = await this.http.get(url2, { params });
-      return response.data;
+      const params = fields?.length ? { fields: fields.join(",") } : {};
+      return await this.httpGet(`/sobjects/${sobject}/${id}`, params);
     } catch (err) {
       throw this.formatError(err, `get ${sobject} record`);
     }
   }
   async createRecord(sobject, data) {
-    await this.ensureAuth();
     try {
-      const response = await this.http.post(`/sobjects/${sobject}`, data);
-      return response.data;
+      return await this.httpPost(`/sobjects/${sobject}`, data);
     } catch (err) {
       throw this.formatError(err, `create ${sobject}`);
     }
   }
   async updateRecord(sobject, id, data) {
-    await this.ensureAuth();
+    if (!/^[a-zA-Z0-9]{15,18}$/.test(id)) {
+      throw new Error(`Invalid record ID: "${id}". Salesforce IDs are 15 or 18 alphanumeric characters.`);
+    }
     try {
-      await this.http.patch(`/sobjects/${sobject}/${id}`, data);
+      await this.httpPatch(`/sobjects/${sobject}/${id}`, data);
     } catch (err) {
       throw this.formatError(err, `update ${sobject} ${id}`);
     }
   }
   async deleteRecord(sobject, id) {
-    await this.ensureAuth();
+    if (!/^[a-zA-Z0-9]{15,18}$/.test(id)) {
+      throw new Error(`Invalid record ID: "${id}". Salesforce IDs are 15 or 18 alphanumeric characters.`);
+    }
     try {
-      await this.http.delete(`/sobjects/${sobject}/${id}`);
+      await this.httpDelete(`/sobjects/${sobject}/${id}`);
     } catch (err) {
       throw this.formatError(err, `delete ${sobject} ${id}`);
     }
   }
   async upsertRecord(sobject, externalIdField, externalId, data) {
-    await this.ensureAuth();
     try {
-      const response = await this.http.patch(
-        `/sobjects/${sobject}/${externalIdField}/${externalId}`,
+      return await this.httpPatch(
+        `/sobjects/${sobject}/${externalIdField}/${encodeURIComponent(externalId)}`,
         data
-      );
-      return response.data ?? { success: true };
+      ) ?? { success: true };
     } catch (err) {
       throw this.formatError(err, `upsert ${sobject}`);
     }
   }
   // ─── Metadata / Describe ───────────────────────────────────────────────────
   async describeSObject(sobject) {
-    await this.ensureAuth();
     try {
-      const response = await this.http.get(
-        `/sobjects/${sobject}/describe`
-      );
-      return response.data;
+      return await this.httpGet(`/sobjects/${sobject}/describe`);
     } catch (err) {
       throw this.formatError(err, `describe ${sobject}`);
     }
   }
   async listSObjects() {
-    await this.ensureAuth();
     try {
-      const response = await this.http.get("/sobjects");
-      return response.data.sobjects;
+      const resp = await this.httpGet("/sobjects");
+      return resp.sobjects;
     } catch (err) {
       throw this.formatError(err, "list sobjects");
     }
   }
-  // ─── Apex Execute ──────────────────────────────────────────────────────────
-  async executeApex(apexBody) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.post(
-        "/tooling/executeAnonymous",
-        null,
-        { params: { anonymousBody: apexBody } }
-      );
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, "execute Apex");
-    }
-  }
-  // ─── Flows ─────────────────────────────────────────────────────────────────
-  async listFlows() {
-    const result = await this.query(
-      "SELECT Id, ApiName, Label, Status, ProcessType, TriggerType FROM FlowDefinitionView ORDER BY Label LIMIT 200"
-    );
-    return result.records;
-  }
-  async invokeFlow(flowApiName, inputs) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.post(
-        `/actions/custom/flow/${flowApiName}`,
-        { inputs: [inputs] }
-      );
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `invoke flow ${flowApiName}`);
-    }
-  }
-  // ─── Bulk Operations ───────────────────────────────────────────────────────
-  async bulkCreateRecords(sobject, records) {
-    await this.ensureAuth();
-    const chunks = [];
-    for (let i = 0; i < records.length; i += 200) {
-      chunks.push(records.slice(i, i + 200));
-    }
-    const results = [];
-    for (const chunk of chunks) {
-      const body = {
-        allOrNone: false,
-        records: chunk.map((r) => ({ attributes: { type: sobject }, ...r }))
-      };
-      const resp = await this.http.post(
-        "/composite/sobjects",
-        body
-      );
-      results.push(...resp.data);
-    }
-    return { results };
-  }
-  // ─── Reports ───────────────────────────────────────────────────────────────
-  async listReports() {
-    const result = await this.query(
-      "SELECT Id, Name, DeveloperName, FolderName, LastRunDate FROM Report ORDER BY Name LIMIT 100"
-    );
-    return result.records;
-  }
-  async runReport(reportId) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get(
-        `/analytics/reports/${reportId}?includeDetails=true`
-      );
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `run report ${reportId}`);
-    }
-  }
-  // ─── User / Org Info ───────────────────────────────────────────────────────
-  async getCurrentUser() {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get("/chatter/users/me");
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, "get current user");
-    }
-  }
-  async getOrgLimits() {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get("/limits");
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, "get org limits");
-    }
-  }
-  // ─── Custom Metadata Types ─────────────────────────────────────────────────
-  async listCustomMetadataTypes() {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get(
-        "/tooling/query",
-        { params: { q: "SELECT Id, DeveloperName, Label, Description FROM CustomObject WHERE ManageableState = 'unmanaged' AND DeveloperName LIKE '%__mdt'" } }
-      );
-      return response.data.records ?? [];
-    } catch {
-      const all3 = await this.listSObjects();
-      return all3.filter((o) => o.name.endsWith("__mdt")).map((o) => ({
-        name: o.name,
-        label: o.label,
-        labelPlural: o.labelPlural
-      }));
-    }
-  }
-  async queryCustomMetadata(mdtApiName, fields) {
-    const fieldList = fields && fields.length > 0 ? fields.join(", ") : "Id, DeveloperName, Label, MasterLabel";
-    return this.queryAll(`SELECT ${fieldList} FROM ${mdtApiName} LIMIT 200`);
-  }
-  // ─── Custom Settings ───────────────────────────────────────────────────────
-  async listCustomSettings() {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get(
-        "/tooling/query",
-        { params: { q: "SELECT Id, DeveloperName, Label, SetupDefinitionName, Visibility FROM CustomObject WHERE CustomSettingType != null" } }
-      );
-      return response.data.records ?? [];
-    } catch {
-      const all3 = await this.listSObjects();
-      return all3.filter((o) => o.name.endsWith("__c")).map((o) => ({
-        name: o.name,
-        label: o.label
-      }));
-    }
-  }
-  async getCustomSetting(settingName) {
-    await this.ensureAuth();
-    try {
-      const describe = await this.describeSObject(settingName);
-      const fieldNames = describe.fields.map((f) => f.name).join(", ");
-      const result = await this.query(`SELECT ${fieldNames} FROM ${settingName} LIMIT 200`);
-      return { describe: { name: describe.name, label: describe.label }, records: result.records, totalSize: result.totalSize };
-    } catch (err) {
-      throw this.formatError(err, `get custom setting ${settingName}`);
-    }
-  }
-  // ─── Platform Events ───────────────────────────────────────────────────────
-  async listPlatformEvents() {
-    const all3 = await this.listSObjects();
-    return all3.filter((o) => o.name.endsWith("__e")).map((o) => ({
-      name: o.name,
-      label: o.label,
-      labelPlural: o.labelPlural
-    }));
-  }
-  async publishPlatformEvent(eventName, payload) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.post(`/sobjects/${eventName}`, payload);
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `publish platform event ${eventName}`);
-    }
-  }
-  // ─── Dashboards ────────────────────────────────────────────────────────────
-  async listDashboards() {
-    const result = await this.query(
-      "SELECT Id, Title, DeveloperName, FolderId, FolderName, LastRefreshDate, LastModifiedDate, LastModifiedById FROM Dashboard ORDER BY Title LIMIT 200"
-    );
-    return result.records;
-  }
-  async getDashboard(dashboardId) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get(
-        `/analytics/dashboards/${dashboardId}`
-      );
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `get dashboard ${dashboardId}`);
-    }
-  }
-  async getDashboardResults(dashboardId) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get(
-        `/analytics/dashboards/${dashboardId}/results`
-      );
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `get dashboard results ${dashboardId}`);
-    }
-  }
-  async refreshDashboard(dashboardId) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.put(
-        `/analytics/dashboards/${dashboardId}`
-      );
-      return response.data ?? { success: true, refreshed: dashboardId };
-    } catch (err) {
-      throw this.formatError(err, `refresh dashboard ${dashboardId}`);
-    }
-  }
-  // ─── Reports (extended) ────────────────────────────────────────────────────
-  async runReportFiltered(reportId, filters) {
-    await this.ensureAuth();
-    try {
-      const body = {
-        reportMetadata: {
-          reportFilters: filters.map((f) => ({
-            column: f.column,
-            operator: f.operator,
-            value: f.value
-          }))
-        }
-      };
-      const response = await this.http.post(
-        `/analytics/reports/${reportId}?includeDetails=true`,
-        body
-      );
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `run filtered report ${reportId}`);
-    }
-  }
-  async getReportMetadata(reportId) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get(
-        `/analytics/reports/${reportId}/describe`
-      );
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `get report metadata ${reportId}`);
-    }
-  }
-  // ─── Tooling API ───────────────────────────────────────────────────────────
-  async toolingQuery(soql) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get(
-        "/tooling/query",
-        { params: { q: soql } }
-      );
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, "tooling query");
-    }
-  }
-  async listValidationRules(sobject) {
-    const filter2 = sobject ? ` AND EntityDefinition.QualifiedApiName = '${sobject}'` : "";
-    const result = await this.toolingQuery(
-      `SELECT Id, Active, Description, ErrorConditionFormula, ErrorMessage, EntityDefinition.QualifiedApiName FROM ValidationRule WHERE Active = true${filter2} LIMIT 200`
-    );
-    return result.records ?? [];
-  }
-  async listWorkflowRules(sobject) {
-    const filter2 = sobject ? ` AND TableEnumOrId = '${sobject}'` : "";
-    const result = await this.toolingQuery(
-      `SELECT Id, Name, Active, Description, TriggerType, TableEnumOrId FROM WorkflowRule WHERE Active = true${filter2} LIMIT 200`
-    );
-    return result.records ?? [];
-  }
-  async listApexClasses(filter2) {
-    const where = filter2 ? ` WHERE Name LIKE '%${filter2}%'` : "";
-    const result = await this.toolingQuery(
-      `SELECT Id, Name, Status, IsValid, LengthWithoutComments, LastModifiedDate FROM ApexClass${where} ORDER BY Name LIMIT 200`
-    );
-    return result.records ?? [];
-  }
-  async listApexTriggers(sobject) {
-    const filter2 = sobject ? ` WHERE TableEnumOrId = '${sobject}'` : "";
-    const result = await this.toolingQuery(
-      `SELECT Id, Name, TableEnumOrId, Status, IsValid, UsageBeforeInsert, UsageAfterInsert, UsageBeforeUpdate, UsageAfterUpdate, UsageBeforeDelete, UsageAfterDelete FROM ApexTrigger${filter2} LIMIT 200`
-    );
-    return result.records ?? [];
-  }
-  async getApexClassBody(classId) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get(
-        `/tooling/sobjects/ApexClass/${classId}`
-      );
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `get apex class ${classId}`);
-    }
-  }
-  // ─── Permission Sets & Profiles ────────────────────────────────────────────
-  async listPermissionSets() {
-    const result = await this.query(
-      "SELECT Id, Name, Label, Description, IsCustom, ProfileId FROM PermissionSet WHERE IsOwnedByProfile = false ORDER BY Name LIMIT 200"
-    );
-    return result.records;
-  }
-  async listProfiles() {
-    const result = await this.query(
-      "SELECT Id, Name, Description, UserType FROM Profile ORDER BY Name LIMIT 200"
-    );
-    return result.records;
-  }
-  async getPermissionSetAssignments(permSetId) {
-    const result = await this.query(
-      `SELECT Id, AssigneeId, Assignee.Name, Assignee.Email FROM PermissionSetAssignment WHERE PermissionSetId = '${permSetId}'`
-    );
-    return result.records;
-  }
-  // ─── Approval Processes ────────────────────────────────────────────────────
-  async listApprovalProcesses() {
-    const result = await this.toolingQuery(
-      "SELECT Id, DeveloperName, TableEnumOrId, ProcessOrder, Active, Description FROM ProcessDefinition WHERE Type = 'Approval' ORDER BY DeveloperName LIMIT 200"
-    );
-    return result.records ?? [];
-  }
-  async submitForApproval(recordId, comments, submitterId) {
-    await this.ensureAuth();
-    try {
-      const body = {
-        actionType: "Submit",
-        contextId: recordId,
-        ...comments && { comments },
-        ...submitterId && { nextApproverIds: [submitterId] }
-      };
-      const response = await this.http.post("/process/approvals", body);
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `submit ${recordId} for approval`);
-    }
-  }
-  async approveRejectRecord(workItemId, action, comments) {
-    await this.ensureAuth();
-    try {
-      const body = {
-        actionType: action,
-        contextId: workItemId,
-        ...comments && { comments }
-      };
-      const response = await this.http.post("/process/approvals", body);
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `${action} work item ${workItemId}`);
-    }
-  }
-  async getPendingApprovals() {
-    const result = await this.query(
-      "SELECT Id, TargetObjectId, ActorId, Actor.Name, ProcessInstance.TargetObject.Name, CreatedDate, ElapsedTimeInDays FROM ProcessInstanceWorkitem ORDER BY CreatedDate DESC LIMIT 100"
-    );
-    return result.records;
-  }
-  // ─── User Management ───────────────────────────────────────────────────────
-  async listUsers(activeOnly = true) {
-    const filter2 = activeOnly ? "WHERE IsActive = true" : "";
-    const result = await this.query(
-      `SELECT Id, Name, Email, Username, ProfileId, Profile.Name, UserRole.Name, IsActive, LastLoginDate FROM User ${filter2} ORDER BY Name LIMIT 200`
-    );
-    return result.records;
-  }
-  async getUserById(userId) {
-    return this.getRecord("User", userId, [
-      "Id",
-      "Name",
-      "Email",
-      "Username",
-      "ProfileId",
-      "Profile.Name",
-      "UserRole.Name",
-      "IsActive",
-      "LastLoginDate",
-      "Department",
-      "Title"
-    ]);
-  }
-  // ─── Scheduled Jobs / Async Apex ──────────────────────────────────────────
-  async listScheduledJobs() {
-    const result = await this.query(
-      "SELECT Id, JobType, Status, ApexClass.Name, CronExpression, NextFireTime, PreviousFireTime, State FROM CronTrigger ORDER BY NextFireTime LIMIT 100"
-    );
-    return result.records;
-  }
-  async listAsyncApexJobs(status) {
-    const filter2 = status ? ` WHERE Status = '${status}'` : "";
-    const result = await this.query(
-      `SELECT Id, ApexClass.Name, Status, JobType, NumberOfErrors, TotalJobItems, JobItemsProcessed, CreatedDate, CompletedDate FROM AsyncApexJob${filter2} ORDER BY CreatedDate DESC LIMIT 100`
-    );
-    return result.records;
-  }
-  // ─── Chatter / Feed ────────────────────────────────────────────────────────
-  async getRecordFeed(recordId) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get(
-        `/chatter/feeds/record/${recordId}/feed-elements`
-      );
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `get feed for ${recordId}`);
-    }
-  }
-  async postChatterFeed(recordId, message) {
-    await this.ensureAuth();
-    try {
-      const body = {
-        feedElementType: "FeedItem",
-        subjectId: recordId,
-        body: { messageSegments: [{ type: "Text", text: message }] }
-      };
-      const response = await this.http.post("/chatter/feed-elements", body);
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `post chatter on ${recordId}`);
-    }
-  }
-  // ─── Files & Attachments ──────────────────────────────────────────────────
-  async listAttachments(recordId) {
-    const result = await this.query(
-      `SELECT Id, Name, ContentType, BodyLength, Description, CreatedDate FROM Attachment WHERE ParentId = '${recordId}' ORDER BY CreatedDate DESC`
-    );
-    return result.records;
-  }
-  async listContentDocuments(recordId) {
-    const result = await this.query(
-      `SELECT Id, ContentDocumentId, ContentDocument.Title, ContentDocument.FileType, ContentDocument.ContentSize, ContentDocument.LastModifiedDate FROM ContentDocumentLink WHERE LinkedEntityId = '${recordId}' ORDER BY ContentDocument.LastModifiedDate DESC`
-    );
-    return result.records;
-  }
-  // ─── 1. Apex Tests (Tooling API async) ────────────────────────────────────
-  async runApexTests(params) {
-    await this.ensureAuth();
-    try {
-      const body = {
-        testLevel: params.testLevel ?? "RunSpecifiedTests",
-        ...params.classNames?.length && { classNames: params.classNames },
-        ...params.suiteNames?.length && { suiteNames: params.suiteNames }
-      };
-      const response = await this.http.post(
-        "/tooling/runTestsAsynchronous",
-        body
-      );
-      return { testRunId: String(response.data) };
-    } catch (err) {
-      throw this.formatError(err, "run apex tests");
-    }
-  }
-  async getApexTestResults(testRunId) {
-    await this.ensureAuth();
-    try {
-      const runResult = await this.toolingQuery(
-        `SELECT Id, Status, StartTime, EndTime, TestTime, MethodsEnqueued, MethodsCompleted, MethodsFailed FROM ApexTestRun WHERE AsyncApexJobId = '${testRunId}'`
-      );
-      const testResults = await this.toolingQuery(
-        `SELECT Id, Outcome, ApexClass.Name, MethodName, Message, StackTrace, RunTime FROM ApexTestResult WHERE AsyncApexJobId = '${testRunId}' ORDER BY Outcome, ApexClass.Name, MethodName`
-      );
-      let coverage = {};
-      try {
-        const covResult = await this.toolingQuery(
-          `SELECT ApexClassOrTrigger.Name, NumLinesCovered, NumLinesUncovered FROM ApexCodeCoverageAggregate ORDER BY NumLinesCovered DESC LIMIT 50`
-        );
-        coverage = { records: covResult.records ?? [] };
-      } catch {
-        coverage = { note: "Coverage data not available" };
-      }
-      const results = testResults.records ?? [];
-      const passed = results.filter((r) => r["Outcome"] === "Pass").length;
-      const failed = results.filter((r) => r["Outcome"] === "Fail").length;
-      const skipped = results.filter((r) => r["Outcome"] === "Skip").length;
-      return {
-        testRunId,
-        summary: { total: results.length, passed, failed, skipped },
-        run: runResult.records?.[0] ?? {},
-        results,
-        coverage
-      };
-    } catch (err) {
-      throw this.formatError(err, `get apex test results for ${testRunId}`);
-    }
-  }
-  // ─── 2. Metadata Deploy (REST-based) ───────────────────────────────────────
-  async deployMetadata(params) {
-    await this.ensureAuth();
-    try {
-      const deployOptions = {
-        allowMissingFiles: false,
-        autoUpdatePackage: false,
-        checkOnly: false,
-        ignoreWarnings: false,
-        purgeOnDelete: false,
-        rollbackOnError: true,
-        testLevel: "NoTestRun",
-        ...params.options
-      };
-      const response = await this.http.post(
-        `/metadata/deployRequest`,
-        {
-          deployOptions,
-          zipFile: params.zipBase64
-        },
-        {
-          headers: { "Content-Type": "application/json" }
-        }
-      );
-      const data = response.data;
-      const deployId = data?.id ?? (data?.deployResult?.id ?? "");
-      return { deployId, status: "Queued" };
-    } catch (err) {
-      throw this.formatError(err, "deploy metadata");
-    }
-  }
-  async getDeployStatus(deployId) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get(
-        `/metadata/deployRequest/${deployId}?includeDetails=true`
-      );
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `get deploy status ${deployId}`);
-    }
-  }
-  // ─── 3. Metadata Retrieve ──────────────────────────────────────────────────
-  async retrieveMetadata(params) {
-    await this.ensureAuth();
-    try {
-      const body = {
-        retrieveRequest: {
-          apiVersion: params.apiVersion ?? this.config.apiVersion.replace("v", ""),
-          singlePackage: params.singlePackage ?? false,
-          ...params.packageNames?.length && { packageNames: params.packageNames },
-          ...params.specificTypes?.length && {
-            unpackaged: {
-              types: params.specificTypes,
-              version: params.apiVersion ?? this.config.apiVersion.replace("v", "")
-            }
-          }
-        }
-      };
-      const response = await this.http.post("/metadata/retrieveRequest", body);
-      const data = response.data;
-      return { retrieveId: data?.id ?? "" };
-    } catch (err) {
-      throw this.formatError(err, "retrieve metadata");
-    }
-  }
-  async getRetrieveStatus(retrieveId) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get(
-        `/metadata/retrieveRequest/${retrieveId}`
-      );
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `get retrieve status ${retrieveId}`);
-    }
-  }
-  // ─── 4. Assign Permission Set ──────────────────────────────────────────────
-  async assignPermissionSet(params) {
-    await this.ensureAuth();
-    try {
-      const psResult = await this.query(
-        `SELECT Id, Name FROM PermissionSet WHERE Name = '${params.permissionSetName}' LIMIT 1`
-      );
-      if (!psResult.records.length) {
-        throw new Error(`Permission Set '${params.permissionSetName}' not found`);
-      }
-      const permSetId = psResult.records[0]["Id"];
-      const existing = await this.query(
-        `SELECT Id FROM PermissionSetAssignment WHERE AssigneeId = '${params.userId}' AND PermissionSetId = '${permSetId}' LIMIT 1`
-      );
-      if (existing.records.length > 0) {
-        return { success: true, message: "Permission Set already assigned", alreadyAssigned: true };
-      }
-      const result = await this.createRecord("PermissionSetAssignment", {
-        AssigneeId: params.userId,
-        PermissionSetId: permSetId
-      });
-      return { ...result, permissionSetName: params.permissionSetName, userId: params.userId };
-    } catch (err) {
-      throw this.formatError(err, `assign permission set ${params.permissionSetName}`);
-    }
-  }
-  async revokePermissionSet(params) {
-    await this.ensureAuth();
-    try {
-      const psResult = await this.query(
-        `SELECT Id FROM PermissionSet WHERE Name = '${params.permissionSetName}' LIMIT 1`
-      );
-      if (!psResult.records.length) throw new Error(`Permission Set '${params.permissionSetName}' not found`);
-      const permSetId = psResult.records[0]["Id"];
-      const assignment = await this.query(
-        `SELECT Id FROM PermissionSetAssignment WHERE AssigneeId = '${params.userId}' AND PermissionSetId = '${permSetId}' LIMIT 1`
-      );
-      if (!assignment.records.length) return { success: true, message: "Not assigned \u2014 nothing to revoke" };
-      await this.deleteRecord("PermissionSetAssignment", assignment.records[0]["Id"]);
-      return { success: true, revoked: params.permissionSetName, userId: params.userId };
-    } catch (err) {
-      throw this.formatError(err, `revoke permission set ${params.permissionSetName}`);
-    }
-  }
-  // ─── 5. Async Operation Poller ─────────────────────────────────────────────
-  async pollAsyncOperation(params) {
-    const maxMs = (params.maxPollSeconds ?? 120) * 1e3;
-    const intervalMs = (params.pollIntervalSeconds ?? 5) * 1e3;
-    const start = Date.now();
-    const terminalStatuses = {
-      apexTest: ["Completed", "Failed", "Aborted"],
-      deploy: ["Succeeded", "Failed", "Canceled", "SucceededPartial"],
-      retrieve: ["Succeeded", "Failed"],
-      apexJob: ["Completed", "Failed", "Aborted"]
-    };
-    while (Date.now() - start < maxMs) {
-      let status = {};
-      if (params.operationType === "apexTest") {
-        status = await this.getApexTestResults(params.operationId);
-        const runStatus = status["run"]?.["Status"];
-        if (!runStatus || terminalStatuses.apexTest.includes(runStatus)) {
-          return { ...status, completed: true };
-        }
-      } else if (params.operationType === "deploy") {
-        status = await this.getDeployStatus(params.operationId);
-        const s = status["deployResult"]?.["status"] ?? status["status"];
-        if (terminalStatuses.deploy.includes(String(s))) return { ...status, completed: true };
-      } else if (params.operationType === "retrieve") {
-        status = await this.getRetrieveStatus(params.operationId);
-        const s = status["status"];
-        if (terminalStatuses.retrieve.includes(s)) return { ...status, completed: true };
-      } else {
-        const jobs = await this.listAsyncApexJobs();
-        const job = jobs.find((j) => j["Id"] === params.operationId);
-        if (!job) return { error: "Job not found", operationId: params.operationId };
-        if (terminalStatuses.apexJob.includes(job["Status"])) return { ...job, completed: true };
-        status = job;
-      }
-      await new Promise((r) => setTimeout(r, intervalMs));
-    }
-    return {
-      completed: false,
-      timedOut: true,
-      operationId: params.operationId,
-      operationType: params.operationType,
-      message: `Operation did not complete within ${params.maxPollSeconds ?? 120}s. Call sf_resume_operation to check again.`
-    };
-  }
-  // ─── 6. Agent Tests (Agentforce) ──────────────────────────────────────────
-  async listAgentTestSuites() {
-    try {
-      const result = await this.toolingQuery(
-        "SELECT Id, DeveloperName, MasterLabel, Description FROM BotVersion LIMIT 100"
-      );
-      return result.records ?? [];
-    } catch {
-      try {
-        const result = await this.toolingQuery(
-          "SELECT Id, DeveloperName, MasterLabel FROM AiEvaluationDefinition LIMIT 100"
-        );
-        return result.records ?? [];
-      } catch {
-        return [];
-      }
-    }
-  }
-  async runAgentTest(params) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.post(
-        "/einstein/ai-evaluation/runs",
-        {
-          evaluationDefinitionId: params.agentTestSuiteId,
-          ...params.botId && { subjectId: params.botId }
-        }
-      );
-      return response.data;
-    } catch (err) {
-      try {
-        const response = await this.http.post(
-          `/aiAssistant/run`,
-          { testSuiteId: params.agentTestSuiteId }
-        );
-        return response.data;
-      } catch {
-        throw this.formatError(err, `run agent test ${params.agentTestSuiteId}`);
-      }
-    }
-  }
-  async getAgentTestResults(runId) {
-    await this.ensureAuth();
-    try {
-      const response = await this.http.get(`/einstein/ai-evaluation/runs/${runId}`);
-      return response.data;
-    } catch (err) {
-      throw this.formatError(err, `get agent test results ${runId}`);
-    }
-  }
-  // ─── 7. Code Analysis (Tooling API based) ─────────────────────────────────
-  async runCodeAnalysis(params) {
-    await this.ensureAuth();
-    try {
-      const container = await this.http.post(
-        "/tooling/sobjects/MetadataContainer",
-        { Name: `CodeAnalysis_${Date.now()}` }
-      );
-      const containerId = container.data.id;
-      const results = [];
-      for (const className of params.classNames ?? []) {
-        const classResult = await this.toolingQuery(
-          `SELECT Id, Name, Body FROM ApexClass WHERE Name = '${className}' LIMIT 1`
-        );
-        if (classResult.records?.length) {
-          const cls = classResult.records[0];
-          try {
-            await this.http.post("/tooling/sobjects/ApexClassMember", {
-              MetadataContainerId: containerId,
-              ContentEntityId: cls.Id,
-              Body: cls.Body
-            });
-          } catch (e) {
-            results.push({ className, error: String(e) });
-          }
-        }
-      }
-      let compileResult = {};
-      try {
-        const asyncReq = await this.http.post(
-          "/tooling/sobjects/ContainerAsyncRequest",
-          { MetadataContainerId: containerId, IsCheckOnly: true }
-        );
-        let attempts = 0;
-        while (attempts < 10) {
-          await new Promise((r) => setTimeout(r, 2e3));
-          const status = await this.http.get(
-            `/tooling/sobjects/ContainerAsyncRequest/${asyncReq.data.id}`
-          );
-          const s = status.data;
-          if (s.State === "Completed" || s.State === "Failed" || s.State === "Error") {
-            compileResult = s;
-            break;
-          }
-          attempts++;
-        }
-      } catch (e) {
-        compileResult = { note: "Compile check skipped", error: String(e) };
-      }
-      try {
-        await this.http.delete(`/tooling/sobjects/MetadataContainer/${containerId}`);
-      } catch {
-      }
-      const symbolIssues = [];
-      for (const className of params.classNames ?? []) {
-        try {
-          const sym = await this.toolingQuery(
-            `SELECT Id, SymbolTable FROM ApexClass WHERE Name = '${className}' LIMIT 1`
-          );
-          if (sym.records?.length) symbolIssues.push({ className, symbolTable: sym.records[0]["SymbolTable"] });
-        } catch {
-        }
-      }
-      return {
-        summary: `Analyzed ${params.classNames?.length ?? 0} class(es), ${params.triggerNames?.length ?? 0} trigger(s)`,
-        compileCheck: compileResult,
-        symbolAnalysis: symbolIssues,
-        results
-      };
-    } catch (err) {
-      throw this.formatError(err, "run code analysis");
-    }
-  }
-  // ─── 8. Apex Antipattern Scanner ──────────────────────────────────────────
-  async scanApexAntipatterns(params) {
-    const antipatternResults = [];
-    for (const className of params.classNames) {
-      const classResult = await this.toolingQuery(
-        `SELECT Id, Name, Body, LengthWithoutComments FROM ApexClass WHERE Name = '${className}' LIMIT 1`
-      );
-      if (!classResult.records?.length) {
-        antipatternResults.push({ className, error: "Class not found" });
-        continue;
-      }
-      const cls = classResult.records[0];
-      const body = cls.Body || "";
-      const issues = [];
-      const lines = body.split("\n");
-      let inLoop = false;
-      let loopDepth = 0;
-      let soqlInLoop = 0;
-      let dmlInLoop = 0;
-      const loopPatterns = [/\bfor\s*\(/, /\bwhile\s*\(/, /\bdo\s*\{/];
-      const soqlPattern = /\[\s*SELECT\s+/i;
-      const dmlPatterns = /\b(insert|update|delete|upsert|merge|undelete)\s+/i;
-      const limitlessQueryPattern = /\[\s*SELECT\b(?![^[]*LIMIT\s+\d)/i;
-      const hardcodedIdPattern = /['"][a-zA-Z0-9]{15,18}['"]/;
-      const debugPattern = /System\.debug\s*\(/i;
-      const catchEmptyPattern = /\}\s*catch\s*\([^)]+\)\s*\{\s*\}/;
-      const withoutSharingPattern = /class\s+\w+\s+without\s+sharing/i;
-      const futureMethodHttpPattern = /@future\s*\(\s*callout\s*=\s*true\s*\)/i;
-      lines.forEach((line, i) => {
-        const lineNum = i + 1;
-        const trimmed = line.trim();
-        if (loopPatterns.some((p) => p.test(trimmed))) {
-          inLoop = true;
-          loopDepth++;
-        }
-        if (inLoop) {
-          const opens = (trimmed.match(/\{/g) || []).length;
-          const closes = (trimmed.match(/\}/g) || []).length;
-          loopDepth += opens - closes;
-          if (loopDepth <= 0) {
-            inLoop = false;
-            loopDepth = 0;
-          }
-        }
-        if (inLoop && soqlPattern.test(trimmed)) {
-          soqlInLoop++;
-          issues.push({ severity: "CRITICAL", line: lineNum, pattern: "SOQL_IN_LOOP", description: "SOQL query inside a loop \u2014 risks hitting governor limits (max 100 queries)", recommendation: "Move SOQL outside the loop. Collect IDs first, then query in bulk." });
-        }
-        if (inLoop && dmlPatterns.test(trimmed)) {
-          dmlInLoop++;
-          issues.push({ severity: "CRITICAL", line: lineNum, pattern: "DML_IN_LOOP", description: "DML operation inside a loop \u2014 risks hitting DML governor limit (150 statements)", recommendation: "Collect records in a List, then perform a single DML outside the loop." });
-        }
-        if (!inLoop && limitlessQueryPattern.test(trimmed)) {
-          issues.push({ severity: "WARNING", line: lineNum, pattern: "SOQL_NO_LIMIT", description: "SOQL query without a LIMIT clause", recommendation: "Add LIMIT clause or use queryAll with controlled pagination." });
-        }
-        if (hardcodedIdPattern.test(trimmed) && !trimmed.startsWith("//")) {
-          issues.push({ severity: "WARNING", line: lineNum, pattern: "HARDCODED_ID", description: "Potential hardcoded Salesforce ID in code", recommendation: "Use Custom Metadata, Custom Labels, or Custom Settings to store IDs." });
-        }
-        if (debugPattern.test(trimmed)) {
-          issues.push({ severity: "INFO", line: lineNum, pattern: "SYSTEM_DEBUG", description: "System.debug() found \u2014 remove from production code", recommendation: "Remove debug statements before deploying to production." });
-        }
-        if (catchEmptyPattern.test(trimmed)) {
-          issues.push({ severity: "HIGH", line: lineNum, pattern: "EMPTY_CATCH", description: "Empty catch block swallows exceptions silently", recommendation: "Log the exception or re-throw. Never silently ignore exceptions." });
-        }
-        if (withoutSharingPattern.test(trimmed)) {
-          issues.push({ severity: "HIGH", line: lineNum, pattern: "WITHOUT_SHARING", description: "Class declared 'without sharing' bypasses field/record security", recommendation: "Use 'with sharing' unless there is a documented business reason." });
-        }
-        if (futureMethodHttpPattern.test(trimmed)) {
-          issues.push({ severity: "INFO", line: lineNum, pattern: "FUTURE_CALLOUT", description: "@future(callout=true) found \u2014 consider using Queueable for better control", recommendation: "Queueable Apex supports callouts and provides job chaining and monitoring." });
-        }
-      });
-      antipatternResults.push({
-        className,
-        classId: cls.Id,
-        linesOfCode: cls.LengthWithoutComments,
-        totalIssues: issues.length,
-        critical: issues.filter((i) => i.severity === "CRITICAL").length,
-        high: issues.filter((i) => i.severity === "HIGH").length,
-        warning: issues.filter((i) => i.severity === "WARNING").length,
-        info: issues.filter((i) => i.severity === "INFO").length,
-        issues
-      });
-    }
-    const totalCritical = antipatternResults.reduce((sum, r) => sum + (r["critical"] || 0), 0);
-    const totalIssues = antipatternResults.reduce((sum, r) => sum + (r["totalIssues"] || 0), 0);
-    return {
-      summary: {
-        classesScanned: params.classNames.length,
-        totalIssues,
-        totalCritical,
-        recommendation: totalCritical > 0 ? "\u{1F6A8} Critical governor limit violations found. Fix SOQL/DML in loops before deploying." : totalIssues > 0 ? "\u26A0\uFE0F Issues found. Review warnings before production deployment." : "\u2705 No major antipatterns detected."
-      },
-      results: antipatternResults
-    };
-  }
-  // ─── 9 & 10. SFDX CLI bridge (scratch orgs + list orgs) ──────────────────
-  async checkSfdxAvailable() {
-    const { execSync } = await import("child_process");
-    try {
-      execSync("sf version --json", { stdio: "pipe", timeout: 5e3 });
-      return true;
-    } catch {
-      try {
-        execSync("sfdx version --json", { stdio: "pipe", timeout: 5e3 });
-        return true;
-      } catch {
-        return false;
-      }
-    }
-  }
-  async listAllOrgs() {
-    const { execSync } = await import("child_process");
-    const available = await this.checkSfdxAvailable();
-    if (!available) {
-      return {
-        error: "Salesforce CLI (sf) not installed or not in PATH",
-        suggestion: "Install with: npm install -g @salesforce/cli",
-        alternative: "Use SF_USERNAME environment variable to connect to a specific org via REST"
-      };
-    }
-    try {
-      const output = execSync("sf org list --json", { stdio: "pipe", timeout: 15e3 }).toString();
-      const parsed = JSON.parse(output);
-      return { success: true, orgs: parsed.result ?? parsed };
-    } catch (err) {
-      return { error: `sf org list failed: ${String(err)}` };
-    }
-  }
-  async createScratchOrg(params) {
-    const { execSync } = await import("child_process");
-    const available = await this.checkSfdxAvailable();
-    if (!available) {
-      return {
-        error: "Salesforce CLI (sf) not installed or not in PATH",
-        suggestion: "Install with: npm install -g @salesforce/cli",
-        docs: "https://developer.salesforce.com/docs/atlas.en-us.sfdx_setup.meta/sfdx_setup/sfdx_setup_install_cli.htm"
-      };
-    }
-    try {
-      const cmd = [
-        "sf org create scratch",
-        params.devHubAlias ? `--target-dev-hub ${params.devHubAlias}` : "",
-        `--alias ${params.alias}`,
-        params.definitionFile ? `--definition-file ${params.definitionFile}` : `--edition ${params.edition ?? "developer"}`,
-        `--duration-days ${params.durationDays ?? 7}`,
-        params.noNamespace ? "--no-namespace" : "",
-        "--json"
-      ].filter(Boolean).join(" ");
-      const output = execSync(cmd, { stdio: "pipe", timeout: 12e4 }).toString();
-      const parsed = JSON.parse(output);
-      return { success: true, org: parsed.result ?? parsed };
-    } catch (err) {
-      const errStr = String(err);
-      return {
-        success: false,
-        error: errStr,
-        hint: errStr.includes("not authorized") ? "Run 'sf org login web --set-default-dev-hub' first" : void 0
-      };
-    }
-  }
-  async deleteScratchOrg(aliasOrUsername) {
-    const { execSync } = await import("child_process");
-    const available = await this.checkSfdxAvailable();
-    if (!available) return { error: "Salesforce CLI not available" };
-    try {
-      const output = execSync(
-        `sf org delete scratch --target-org ${aliasOrUsername} --no-prompt --json`,
-        { stdio: "pipe", timeout: 3e4 }
-      ).toString();
-      return { success: true, result: JSON.parse(output) };
-    } catch (err) {
-      return { success: false, error: String(err) };
-    }
-  }
-  async openOrg(aliasOrUsername) {
-    const { execSync } = await import("child_process");
-    const available = await this.checkSfdxAvailable();
-    if (!available) {
-      await this.ensureAuth();
-      return {
-        loginUrl: this.auth?.instanceUrl,
-        message: "Salesforce CLI not available. Open the URL above in your browser."
-      };
-    }
-    try {
-      const target = aliasOrUsername ? `--target-org ${aliasOrUsername}` : "";
-      const output = execSync(`sf org open ${target} --url-only --json`, {
-        stdio: "pipe",
-        timeout: 15e3
-      }).toString();
-      const parsed = JSON.parse(output);
-      return { success: true, url: parsed.result?.url ?? parsed };
-    } catch {
-      await this.ensureAuth();
-      return {
-        loginUrl: this.auth?.instanceUrl,
-        message: "Could not open via CLI. Use the URL above."
-      };
-    }
-  }
-  // ─── BULK 2.0 API ──────────────────────────────────────────────────────────
-  // Handles millions of records via CSV. Three job types:
-  //   ingest: insert | update | upsert | delete | hardDelete
-  //   query:  SOQL queries returning large result sets
-  getBulkBaseUrl() {
-    return `${this.auth.instanceUrl}/services/data/${this.config.apiVersion}`;
-  }
-  getBulkHeaders() {
-    return {
-      Authorization: `Bearer ${this.auth.accessToken}`,
-      "Content-Type": "application/json",
-      Accept: "application/json"
-    };
-  }
-  // Convert array of objects → CSV string
-  recordsToCsv(records) {
-    if (!records.length) return "";
-    const headers = Object.keys(records[0]);
-    const escape2 = (v) => {
-      const s = v === null || v === void 0 ? "" : String(v);
-      return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const rows = records.map((r) => headers.map((h) => escape2(r[h])).join(","));
-    return [headers.join(","), ...rows].join("\n");
-  }
-  // Parse CSV string → array of objects
-  csvToRecords(csv) {
-    const lines = csv.trim().split("\n");
-    if (lines.length < 2) return [];
-    const headers = lines[0].split(",").map((h) => h.trim().replace(/^"|"$/g, ""));
-    return lines.slice(1).map((line) => {
-      const values = line.match(/(".*?"|[^,]+|(?<=,)(?=,)|^(?=,)|(?<=,)$)/g) ?? [];
-      const record2 = {};
-      headers.forEach((h, i) => {
-        record2[h] = (values[i] ?? "").replace(/^"|"$/g, "").replace(/""/g, '"');
-      });
-      return record2;
-    });
-  }
-  // ─── Bulk 2.0 Ingest (insert/update/upsert/delete/hardDelete) ─────────────
-  async bulkIngestCreate(params) {
-    await this.ensureAuth();
-    const body = {
-      object: params.sobject,
-      operation: params.operation,
-      contentType: "CSV",
-      lineEnding: params.lineEnding ?? "LF",
-      ...params.operation === "upsert" && params.externalIdFieldName ? { externalIdFieldName: params.externalIdFieldName } : {}
-    };
-    const response = await axios_default.post(
-      `${this.getBulkBaseUrl()}/jobs/ingest`,
-      body,
-      { headers: this.getBulkHeaders() }
-    );
-    const d = response.data;
-    return { jobId: d.id, state: d.state, contentUrl: d.contentUrl };
-  }
-  async bulkIngestUpload(jobId, csvData) {
-    await this.ensureAuth();
-    await axios_default.put(
-      `${this.getBulkBaseUrl()}/jobs/ingest/${jobId}/batches`,
-      csvData,
-      {
-        headers: {
-          Authorization: `Bearer ${this.auth.accessToken}`,
-          "Content-Type": "text/csv",
-          Accept: "application/json"
-        }
-      }
-    );
-  }
-  async bulkIngestClose(jobId) {
-    await this.ensureAuth();
-    const response = await axios_default.patch(
-      `${this.getBulkBaseUrl()}/jobs/ingest/${jobId}`,
-      { state: "UploadComplete" },
-      { headers: this.getBulkHeaders() }
-    );
-    return response.data;
-  }
-  async bulkIngestAbort(jobId) {
-    await this.ensureAuth();
-    const response = await axios_default.patch(
-      `${this.getBulkBaseUrl()}/jobs/ingest/${jobId}`,
-      { state: "Aborted" },
-      { headers: this.getBulkHeaders() }
-    );
-    return response.data;
-  }
-  async bulkIngestDelete(jobId) {
-    await this.ensureAuth();
-    await axios_default.delete(
-      `${this.getBulkBaseUrl()}/jobs/ingest/${jobId}`,
-      { headers: this.getBulkHeaders() }
-    );
-  }
-  // Full ingest flow: create job → upload CSV → close → return jobId
-  async bulkIngest(params) {
-    if (!params.records.length) throw new Error("No records provided");
-    const job = await this.bulkIngestCreate({
-      sobject: params.sobject,
-      operation: params.operation,
-      externalIdFieldName: params.externalIdFieldName
-    });
-    const csv = this.recordsToCsv(params.records);
-    await this.bulkIngestUpload(job.jobId, csv);
-    await this.bulkIngestClose(job.jobId);
-    return {
-      jobId: job.jobId,
-      recordCount: params.records.length,
-      state: "UploadComplete",
-      message: `Bulk ${params.operation} job created for ${params.records.length} ${params.sobject} records. Use sf_get_bulk_job_status with jobId "${job.jobId}" to track progress.`
-    };
-  }
-  // ─── Bulk 2.0 Job Status ───────────────────────────────────────────────────
-  async getBulkJobStatus(jobId, jobType = "ingest") {
-    await this.ensureAuth();
-    const response = await axios_default.get(
-      `${this.getBulkBaseUrl()}/jobs/${jobType}/${jobId}`,
-      { headers: this.getBulkHeaders() }
-    );
-    const d = response.data;
-    return {
-      ...d,
-      summary: {
-        jobId,
-        state: d["state"],
-        object: d["object"],
-        operation: d["operation"],
-        totalProcessed: d["numberRecordsProcessed"],
-        failed: d["numberRecordsFailed"],
-        succeeded: (Number(d["numberRecordsProcessed"]) || 0) - (Number(d["numberRecordsFailed"]) || 0),
-        createdDate: d["createdDate"]
-      }
-    };
-  }
-  async listBulkJobs(jobType = "ingest") {
-    await this.ensureAuth();
-    const response = await axios_default.get(
-      `${this.getBulkBaseUrl()}/jobs/${jobType}`,
-      { headers: this.getBulkHeaders() }
-    );
-    return response.data;
-  }
-  // ─── Bulk 2.0 Ingest Results ───────────────────────────────────────────────
-  async getBulkJobResults(params) {
-    await this.ensureAuth();
-    const response = await axios_default.get(
-      `${this.getBulkBaseUrl()}/jobs/ingest/${params.jobId}/${params.resultType}`,
-      {
-        headers: {
-          Authorization: `Bearer ${this.auth.accessToken}`,
-          Accept: "text/csv"
-        },
-        responseType: "text"
-      }
-    );
-    const records = this.csvToRecords(response.data);
-    const limited = params.maxRecords ? records.slice(0, params.maxRecords) : records;
-    return { records: limited, count: limited.length, resultType: params.resultType };
-  }
-  // ─── Bulk 2.0 Query ────────────────────────────────────────────────────────
-  async bulkQueryCreate(soql) {
-    await this.ensureAuth();
-    const response = await axios_default.post(
-      `${this.getBulkBaseUrl()}/jobs/query`,
-      { operation: "query", query: soql },
-      { headers: this.getBulkHeaders() }
-    );
-    const d = response.data;
-    return { jobId: d.id, state: d.state };
-  }
-  async getBulkQueryResults(params) {
-    await this.ensureAuth();
-    const urlParams = new URLSearchParams();
-    if (params.maxRecords) urlParams.set("maxRecords", String(params.maxRecords));
-    if (params.locator && params.locator !== "null") urlParams.set("locator", params.locator);
-    const response = await axios_default.get(
-      `${this.getBulkBaseUrl()}/jobs/query/${params.jobId}/results?${urlParams}`,
-      {
-        headers: {
-          Authorization: `Bearer ${this.auth.accessToken}`,
-          Accept: "text/csv"
-        },
-        responseType: "text"
-      }
-    );
-    const nextLocator = response.headers["sforce-locator"];
-    const records = this.csvToRecords(response.data);
-    return {
-      records,
-      count: records.length,
-      nextLocator: nextLocator && nextLocator !== "null" ? nextLocator : void 0,
-      done: !nextLocator || nextLocator === "null"
-    };
-  }
-  // Full bulk query flow: create job → poll until complete → return results
-  async bulkQuery(params) {
-    const { jobId } = await this.bulkQueryCreate(params.soql);
-    const maxMs = (params.maxPollSeconds ?? 120) * 1e3;
-    const intervalMs = (params.pollIntervalSeconds ?? 5) * 1e3;
-    const start = Date.now();
-    let state = "UploadComplete";
-    while (Date.now() - start < maxMs) {
-      const status = await this.getBulkJobStatus(jobId, "query");
-      state = status["state"];
-      if (state === "JobComplete" || state === "Failed" || state === "Aborted") break;
-      await new Promise((r) => setTimeout(r, intervalMs));
-    }
-    if (state !== "JobComplete") {
-      return {
-        jobId,
-        records: [],
-        count: 0,
-        done: false,
-        truncated: false
-      };
-    }
-    const results = await this.getBulkQueryResults({
-      jobId,
-      maxRecords: params.maxRecords ?? 1e4
-    });
-    return {
-      jobId,
-      records: results.records,
-      count: results.count,
-      done: results.done,
-      truncated: !results.done
-    };
-  }
   // ─── Error Helper ──────────────────────────────────────────────────────────
   formatError(err, context) {
     if (axios_default.isAxiosError(err)) {
-      const sfErrors = err.response?.data;
-      if (Array.isArray(sfErrors) && sfErrors.length > 0) {
-        const msg = sfErrors.map(
-          (e) => `[${e.errorCode}] ${e.message}`
-        ).join("; ");
-        return new Error(`Salesforce error during ${context}: ${msg}`);
+      const data = err.response?.data;
+      const status = err.response?.status;
+      if (Array.isArray(data) && data.length > 0) {
+        const msgs = data.map((e) => `[${e.errorCode}] ${e.message}`).join("; ");
+        return new Error(`Salesforce error during ${context}: ${msgs}`);
       }
-      return new Error(
-        `Salesforce HTTP ${err.response?.status} during ${context}: ${err.message}`
-      );
+      if (data && typeof data === "object") {
+        const d = data;
+        if (d.errorCode) return new Error(`Salesforce error during ${context}: [${d.errorCode}] ${d.message}`);
+        if (d.error) return new Error(`Salesforce error during ${context}: ${d.error_description ?? d.error}`);
+      }
+      if (err.code === "ECONNABORTED") return new Error(`Request timed out during ${context}. Try adding a LIMIT or WHERE clause.`);
+      if (err.code === "ENOTFOUND" || err.code === "ECONNREFUSED") return new Error(`Cannot reach Salesforce during ${context}. Check internet connection and SF_LOGIN_URL.`);
+      return new Error(`Salesforce HTTP ${status} during ${context}: ${err.message}`);
     }
     return err instanceof Error ? err : new Error(String(err));
   }
 };
+
+// src/utils/errors.ts
+function safeJSON(data) {
+  try {
+    return JSON.stringify(data, (_key, value) => {
+      if (typeof value === "bigint") return value.toString();
+      if (value === void 0) return null;
+      return value;
+    }, 2);
+  } catch {
+    return JSON.stringify({ error: "Could not serialize response", raw: String(data) }, null, 2);
+  }
+}
+function ok(data) {
+  const text = safeJSON(data);
+  return {
+    content: [{ type: "text", text }],
+    structuredContent: data
+  };
+}
 
 // src/schemas/tools.ts
 var SObjectNameSchema = external_exports.string().min(1).describe("Salesforce SObject API name, e.g. 'Account', 'Opportunity', 'Contact'");
@@ -57607,10 +56568,7 @@ Tips:
     },
     async ({ soql, fetch_all }) => {
       const result = fetch_all ? await client.queryAll(soql) : await client.query(soql);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -57635,10 +56593,7 @@ Examples:
     },
     async ({ sosl }) => {
       const result = await client.search(sosl);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -57662,10 +56617,7 @@ Examples:
     },
     async ({ sobject, id, fields }) => {
       const record2 = await client.getRecord(sobject, id, fields);
-      return {
-        content: [{ type: "text", text: JSON.stringify(record2, null, 2) }],
-        structuredContent: record2
-      };
+      return ok(record2);
     }
   );
   server.registerTool(
@@ -57691,10 +56643,7 @@ Tip: Use sf_describe_object first to know which fields are required.`,
     },
     async ({ sobject, data }) => {
       const result = await client.createRecord(sobject, data);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -57772,10 +56721,7 @@ Example:
     },
     async ({ sobject, external_id_field, external_id, data }) => {
       const result = await client.upsertRecord(sobject, external_id_field, external_id, data);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -57800,10 +56746,7 @@ Example:
     },
     async ({ sobject, records }) => {
       const result = await client.bulkCreateRecords(sobject, records);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -57829,10 +56772,7 @@ Examples:
     async ({ sobject, include_fields }) => {
       const describe = await client.describeSObject(sobject);
       const result = include_fields ? describe : { ...describe, fields: void 0 };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -57863,10 +56803,7 @@ Examples:
         );
       }
       const result = { count: objects.length, objects };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
 }
@@ -57923,10 +56860,7 @@ Use this to discover Flow API names before calling sf_invoke_flow.`,
     async () => {
       const flows = await client.listFlows();
       const result = { count: flows.length, flows };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -57948,10 +56882,7 @@ Example:
     },
     async ({ flow_api_name, inputs }) => {
       const result = await client.invokeFlow(flow_api_name, inputs);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -57971,10 +56902,7 @@ Use report IDs from here to call sf_run_report.`,
     async () => {
       const reports = await client.listReports();
       const result = { count: reports.length, reports };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -57994,10 +56922,7 @@ Example: { report_id: "00O1a00000XYZ" }`,
     },
     async ({ report_id }) => {
       const result = await client.runReport(report_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58016,10 +56941,7 @@ Useful for: checking API headroom, storage usage, async Apex queue limits.`,
     },
     async () => {
       const result = await client.getOrgLimits();
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58036,10 +56958,7 @@ Returns: User record with id, name, email, role, profile, and org details.`,
     },
     async () => {
       const result = await client.getCurrentUser();
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
 }
@@ -58063,10 +56982,7 @@ Use this first to find the API name, then call sf_query_custom_metadata to read 
     async () => {
       const types = await client.listCustomMetadataTypes();
       const result = { count: types.length, types };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58090,10 +57006,7 @@ Examples:
     },
     async ({ mdt_api_name, fields }) => {
       const result = await client.queryCustomMetadata(mdt_api_name, fields);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58113,10 +57026,7 @@ Use this to find setting API names, then call sf_get_custom_setting to read valu
     async () => {
       const settings = await client.listCustomSettings();
       const result = { count: settings.length, settings };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58138,10 +57048,7 @@ Examples:
     },
     async ({ setting_api_name }) => {
       const result = await client.getCustomSetting(setting_api_name);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58161,10 +57068,7 @@ Use this to find event API names, then call sf_publish_platform_event to fire on
     async () => {
       const events = await client.listPlatformEvents();
       const result = { count: events.length, events };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58187,10 +57091,7 @@ Examples:
     },
     async ({ event_api_name, payload }) => {
       const result = await client.publishPlatformEvent(event_api_name, payload);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58217,10 +57118,7 @@ Examples:
     },
     async ({ soql }) => {
       const result = await client.toolingQuery(soql);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58243,10 +57141,7 @@ Examples:
     async ({ sobject }) => {
       const rules = await client.listValidationRules(sobject);
       const result = { count: rules.length, validationRules: rules };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58267,10 +57162,7 @@ Note: These are legacy automations. Newer orgs may use Flows instead.`,
     async ({ sobject }) => {
       const rules = await client.listWorkflowRules(sobject);
       const result = { count: rules.length, workflowRules: rules };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58294,10 +57186,7 @@ Examples:
     async ({ filter: filter2 }) => {
       const classes = await client.listApexClasses(filter2);
       const result = { count: classes.length, apexClasses: classes };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58316,10 +57205,7 @@ Returns: Triggers with name, target object, status, and event context (before/af
     async ({ sobject }) => {
       const triggers = await client.listApexTriggers(sobject);
       const result = { count: triggers.length, apexTriggers: triggers };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
 }
@@ -58343,10 +57229,7 @@ Use dashboard IDs here to call sf_get_dashboard or sf_refresh_dashboard.`,
     async () => {
       const dashboards = await client.listDashboards();
       const result = { count: dashboards.length, dashboards };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58364,10 +57247,7 @@ Returns: Dashboard definition with all components and filters.`,
     },
     async ({ dashboard_id }) => {
       const result = await client.getDashboard(dashboard_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58385,10 +57265,7 @@ Returns: Dashboard component data, chart values, metrics, and table results.`,
     },
     async ({ dashboard_id }) => {
       const result = await client.getDashboardResults(dashboard_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58406,10 +57283,7 @@ Returns: Refresh confirmation.`,
     },
     async ({ dashboard_id }) => {
       const result = await client.refreshDashboard(dashboard_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58429,10 +57303,7 @@ Use this to understand a report's structure before running it with custom filter
     },
     async ({ report_id }) => {
       const result = await client.getReportMetadata(report_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58459,10 +57330,7 @@ Examples:
     },
     async ({ report_id, filters }) => {
       const result = await client.runReportFiltered(report_id, filters);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58480,10 +57348,7 @@ Returns: Approval process names, target objects, and order.`,
     async () => {
       const processes = await client.listApprovalProcesses();
       const result = { count: processes.length, approvalProcesses: processes };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58506,10 +57371,7 @@ Example:
     },
     async ({ record_id, comments, next_approver_id }) => {
       const result = await client.submitForApproval(record_id, comments, next_approver_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58529,10 +57391,7 @@ Returns: Result of the approval action.`,
     },
     async ({ work_item_id, action, comments }) => {
       const result = await client.approveRejectRecord(work_item_id, action, comments);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58550,10 +57409,7 @@ Returns: Work items with target record, actor (approver), elapsed time, and crea
     async () => {
       const items = await client.getPendingApprovals();
       const result = { count: items.length, pendingApprovals: items };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58572,10 +57428,7 @@ Returns: Users with ID, name, email, username, profile, role, and last login dat
     async ({ active_only }) => {
       const users = await client.listUsers(active_only);
       const result = { count: users.length, users };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58593,10 +57446,7 @@ Returns: Full user record with profile, role, department, title, and login histo
     },
     async ({ user_id }) => {
       const result = await client.getUserById(user_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58614,10 +57464,7 @@ Returns: Permission sets with ID, name, label, and description.`,
     async () => {
       const permSets = await client.listPermissionSets();
       const result = { count: permSets.length, permissionSets: permSets };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58635,10 +57482,7 @@ Returns: Profiles with ID, name, description, and user type.`,
     async () => {
       const profiles = await client.listProfiles();
       const result = { count: profiles.length, profiles };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58657,10 +57501,7 @@ Returns: Users assigned to this permission set.`,
     async ({ permission_set_id }) => {
       const assignments = await client.getPermissionSetAssignments(permission_set_id);
       const result = { count: assignments.length, assignments };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58678,10 +57519,7 @@ Returns: Scheduled jobs with Apex class name, cron expression, next fire time, p
     async () => {
       const jobs = await client.listScheduledJobs();
       const result = { count: jobs.length, scheduledJobs: jobs };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58705,10 +57543,7 @@ Examples:
     async ({ status }) => {
       const jobs = await client.listAsyncApexJobs(status);
       const result = { count: jobs.length, asyncJobs: jobs };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58726,10 +57561,7 @@ Returns: Feed items with body, author, likes, and comments.`,
     },
     async ({ record_id }) => {
       const result = await client.getRecordFeed(record_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58751,10 +57583,7 @@ Example:
     },
     async ({ record_id, message }) => {
       const result = await client.postChatterFeed(record_id, message);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58773,10 +57602,7 @@ Returns: Files with title, file type, size, and last modified date.`,
     async ({ record_id }) => {
       const files = await client.listContentDocuments(record_id);
       const result = { count: files.length, files };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58795,10 +57621,7 @@ Returns: Attachments with name, content type, size, and description.`,
     async ({ record_id }) => {
       const attachments = await client.listAttachments(record_id);
       const result = { count: attachments.length, attachments };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
 }
@@ -58861,10 +57684,7 @@ Use sf_resume_operation first if the test run is still in progress.`,
     },
     async ({ test_run_id }) => {
       const result = await client.getApexTestResults(test_run_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58896,10 +57716,7 @@ Examples:
         maxPollSeconds: max_poll_seconds,
         pollIntervalSeconds: poll_interval_seconds
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58920,10 +57737,7 @@ Use sf_list_agent_test_suites first to find the correct test suite ID.`,
     },
     async ({ agent_test_suite_id, bot_id }) => {
       const result = await client.runAgentTest({ agentTestSuiteId: agent_test_suite_id, botId: bot_id });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58941,10 +57755,7 @@ Returns: Available test suite IDs to use with sf_run_agent_test.`,
     async () => {
       const suites = await client.listAgentTestSuites();
       const result = { count: suites.length, testSuites: suites };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58962,10 +57773,7 @@ Returns: Agent test outcomes including response quality, intent matching, and ac
     },
     async ({ run_id }) => {
       const result = await client.getAgentTestResults(run_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -58995,10 +57803,7 @@ For deeper antipattern detection (SOQL in loops, DML in loops, hardcoded IDs, et
         triggerNames: trigger_names,
         rules
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59025,10 +57830,7 @@ Example:
     },
     async ({ class_names }) => {
       const result = await client.scanApexAntipatterns({ classNames: class_names });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
 }
@@ -59107,10 +57909,7 @@ Status values: Queued \u2192 InProgress \u2192 Succeeded | Failed | Canceled | S
     },
     async ({ deploy_id }) => {
       const result = await client.getDeployStatus(deploy_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59172,10 +57971,7 @@ Returns: Status and, when Succeeded, a zipFile (base64) containing all retrieved
     },
     async ({ retrieve_id }) => {
       const result = await client.getRetrieveStatus(retrieve_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59200,10 +57996,7 @@ Use sf_list_permission_sets to find valid permission set names.`,
     },
     async ({ user_id, permission_set_name }) => {
       const result = await client.assignPermissionSet({ userId: user_id, permissionSetName: permission_set_name });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59222,10 +58015,7 @@ Returns: Success confirmation.`,
     },
     async ({ user_id, permission_set_name }) => {
       const result = await client.revokePermissionSet({ userId: user_id, permissionSetName: permission_set_name });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59246,10 +58036,7 @@ If CLI is not installed, returns installation instructions and the current conne
     },
     async () => {
       const result = await client.listAllOrgs();
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59286,10 +58073,7 @@ Example:
         definitionFile: definition_file,
         noNamespace: no_namespace
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59310,10 +58094,7 @@ Args:
     async ({ alias_or_username }) => {
       if (!alias_or_username) return { content: [{ type: "text", text: JSON.stringify({ error: "alias_or_username is required" }) }] };
       const result = await client.deleteScratchOrg(alias_or_username);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59331,10 +58112,7 @@ Returns: Login URL for the org.`,
     },
     async ({ alias_or_username }) => {
       const result = await client.openOrg(alias_or_username);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
 }
@@ -59382,10 +58160,7 @@ Examples:
         records,
         externalIdFieldName: external_id_field
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59411,10 +58186,7 @@ When state = JobComplete:
     },
     async ({ job_id, job_type }) => {
       const result = await client.getBulkJobStatus(job_id, job_type);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59432,10 +58204,7 @@ Returns: All bulk jobs with ID, object, operation, state, record counts, and dat
     },
     async ({ job_type }) => {
       const result = await client.listBulkJobs(job_type);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59467,10 +58236,7 @@ Workflow:
         resultType: result_type,
         maxRecords: max_records
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59489,10 +58255,7 @@ Args:
     },
     async ({ job_id }) => {
       const result = await client.bulkIngestAbort(job_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59533,10 +58296,7 @@ Examples:
         pollIntervalSeconds: poll_interval_seconds,
         maxPollSeconds: max_poll_seconds
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59568,10 +58328,7 @@ Pagination pattern:
         maxRecords: max_records,
         locator
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
   server.registerTool(
@@ -59595,10 +58352,7 @@ Useful for verifying which org and auth method the MCP is currently using.`,
         instanceUrl: instanceUrl || "Not yet authenticated",
         description: authMode === "jwt" ? "JWT Bearer Token \u2014 passwordless, production-grade server-to-server auth. Token auto-refreshes." : "Username + Password OAuth \u2014 suitable for development. Enable in Connected App policies."
       };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
+      return ok(result);
     }
   );
 }

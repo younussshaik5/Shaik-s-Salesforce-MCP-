@@ -1,3 +1,4 @@
+import { toolHandler, ok } from "../utils/errors.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { SalesforceClient } from "../services/salesforce-client.js";
@@ -32,10 +33,7 @@ Use this first to find the API name, then call sf_query_custom_metadata to read 
     async () => {
       const types = await client.listCustomMetadataTypes();
       const result = { count: types.length, types };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -61,10 +59,7 @@ Examples:
     },
     async ({ mdt_api_name, fields }) => {
       const result = await client.queryCustomMetadata(mdt_api_name, fields);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -86,10 +81,7 @@ Use this to find setting API names, then call sf_get_custom_setting to read valu
     async () => {
       const settings = await client.listCustomSettings();
       const result = { count: settings.length, settings };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -113,10 +105,7 @@ Examples:
     },
     async ({ setting_api_name }) => {
       const result = await client.getCustomSetting(setting_api_name);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -138,10 +127,7 @@ Use this to find event API names, then call sf_publish_platform_event to fire on
     async () => {
       const events = await client.listPlatformEvents();
       const result = { count: events.length, events };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -166,10 +152,7 @@ Examples:
     },
     async ({ event_api_name, payload }) => {
       const result = await client.publishPlatformEvent(event_api_name, payload);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -198,10 +181,7 @@ Examples:
     },
     async ({ soql }) => {
       const result = await client.toolingQuery(soql);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -226,10 +206,7 @@ Examples:
     async ({ sobject }) => {
       const rules = await client.listValidationRules(sobject);
       const result = { count: rules.length, validationRules: rules };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -252,10 +229,7 @@ Note: These are legacy automations. Newer orgs may use Flows instead.`,
     async ({ sobject }) => {
       const rules = await client.listWorkflowRules(sobject);
       const result = { count: rules.length, workflowRules: rules };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -281,10 +255,7 @@ Examples:
     async ({ filter }) => {
       const classes = await client.listApexClasses(filter);
       const result = { count: classes.length, apexClasses: classes };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -305,10 +276,7 @@ Returns: Triggers with name, target object, status, and event context (before/af
     async ({ sobject }) => {
       const triggers = await client.listApexTriggers(sobject);
       const result = { count: triggers.length, apexTriggers: triggers };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 }

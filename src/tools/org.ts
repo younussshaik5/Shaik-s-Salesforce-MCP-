@@ -1,3 +1,4 @@
+import { toolHandler, ok } from "../utils/errors.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { SalesforceClient } from "../services/salesforce-client.js";
@@ -37,10 +38,7 @@ Use dashboard IDs here to call sf_get_dashboard or sf_refresh_dashboard.`,
     async () => {
       const dashboards = await client.listDashboards();
       const result = { count: dashboards.length, dashboards };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -59,10 +57,7 @@ Returns: Dashboard definition with all components and filters.`,
     },
     async ({ dashboard_id }) => {
       const result = await client.getDashboard(dashboard_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -81,10 +76,7 @@ Returns: Dashboard component data, chart values, metrics, and table results.`,
     },
     async ({ dashboard_id }) => {
       const result = await client.getDashboardResults(dashboard_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -103,10 +95,7 @@ Returns: Refresh confirmation.`,
     },
     async ({ dashboard_id }) => {
       const result = await client.refreshDashboard(dashboard_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -128,10 +117,7 @@ Use this to understand a report's structure before running it with custom filter
     },
     async ({ report_id }) => {
       const result = await client.getReportMetadata(report_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -159,10 +145,7 @@ Examples:
     },
     async ({ report_id, filters }) => {
       const result = await client.runReportFiltered(report_id, filters);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -182,10 +165,7 @@ Returns: Approval process names, target objects, and order.`,
     async () => {
       const processes = await client.listApprovalProcesses();
       const result = { count: processes.length, approvalProcesses: processes };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -209,10 +189,7 @@ Example:
     },
     async ({ record_id, comments, next_approver_id }) => {
       const result = await client.submitForApproval(record_id, comments, next_approver_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -233,10 +210,7 @@ Returns: Result of the approval action.`,
     },
     async ({ work_item_id, action, comments }) => {
       const result = await client.approveRejectRecord(work_item_id, action, comments);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -255,10 +229,7 @@ Returns: Work items with target record, actor (approver), elapsed time, and crea
     async () => {
       const items = await client.getPendingApprovals();
       const result = { count: items.length, pendingApprovals: items };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -279,10 +250,7 @@ Returns: Users with ID, name, email, username, profile, role, and last login dat
     async ({ active_only }) => {
       const users = await client.listUsers(active_only);
       const result = { count: users.length, users };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -301,10 +269,7 @@ Returns: Full user record with profile, role, department, title, and login histo
     },
     async ({ user_id }) => {
       const result = await client.getUserById(user_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -323,10 +288,7 @@ Returns: Permission sets with ID, name, label, and description.`,
     async () => {
       const permSets = await client.listPermissionSets();
       const result = { count: permSets.length, permissionSets: permSets };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -345,10 +307,7 @@ Returns: Profiles with ID, name, description, and user type.`,
     async () => {
       const profiles = await client.listProfiles();
       const result = { count: profiles.length, profiles };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -368,10 +327,7 @@ Returns: Users assigned to this permission set.`,
     async ({ permission_set_id }) => {
       const assignments = await client.getPermissionSetAssignments(permission_set_id);
       const result = { count: assignments.length, assignments };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -391,10 +347,7 @@ Returns: Scheduled jobs with Apex class name, cron expression, next fire time, p
     async () => {
       const jobs = await client.listScheduledJobs();
       const result = { count: jobs.length, scheduledJobs: jobs };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -419,10 +372,7 @@ Examples:
     async ({ status }) => {
       const jobs = await client.listAsyncApexJobs(status);
       const result = { count: jobs.length, asyncJobs: jobs };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -442,10 +392,7 @@ Returns: Feed items with body, author, likes, and comments.`,
     },
     async ({ record_id }) => {
       const result = await client.getRecordFeed(record_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -468,10 +415,7 @@ Example:
     },
     async ({ record_id, message }) => {
       const result = await client.postChatterFeed(record_id, message);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -492,10 +436,7 @@ Returns: Files with title, file type, size, and last modified date.`,
     async ({ record_id }) => {
       const files = await client.listContentDocuments(record_id);
       const result = { count: files.length, files };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -515,10 +456,7 @@ Returns: Attachments with name, content type, size, and description.`,
     async ({ record_id }) => {
       const attachments = await client.listAttachments(record_id);
       const result = { count: attachments.length, attachments };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 }

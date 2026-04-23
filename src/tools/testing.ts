@@ -1,3 +1,4 @@
+import { toolHandler, ok } from "../utils/errors.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { SalesforceClient } from "../services/salesforce-client.js";
@@ -74,10 +75,7 @@ Use sf_resume_operation first if the test run is still in progress.`,
     },
     async ({ test_run_id }) => {
       const result = await client.getApexTestResults(test_run_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -111,10 +109,7 @@ Examples:
         maxPollSeconds: max_poll_seconds,
         pollIntervalSeconds: poll_interval_seconds,
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -137,10 +132,7 @@ Use sf_list_agent_test_suites first to find the correct test suite ID.`,
     },
     async ({ agent_test_suite_id, bot_id }) => {
       const result = await client.runAgentTest({ agentTestSuiteId: agent_test_suite_id, botId: bot_id });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -160,10 +152,7 @@ Returns: Available test suite IDs to use with sf_run_agent_test.`,
     async () => {
       const suites = await client.listAgentTestSuites();
       const result = { count: suites.length, testSuites: suites };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -183,10 +172,7 @@ Returns: Agent test outcomes including response quality, intent matching, and ac
     },
     async ({ run_id }) => {
       const result = await client.getAgentTestResults(run_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -218,10 +204,7 @@ For deeper antipattern detection (SOQL in loops, DML in loops, hardcoded IDs, et
         triggerNames: trigger_names,
         rules,
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -250,10 +233,7 @@ Example:
     },
     async ({ class_names }) => {
       const result = await client.scanApexAntipatterns({ classNames: class_names });
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 }

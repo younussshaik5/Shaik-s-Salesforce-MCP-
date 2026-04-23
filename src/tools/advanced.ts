@@ -1,3 +1,4 @@
+import { toolHandler, ok } from "../utils/errors.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SalesforceClient } from "../services/salesforce-client.js";
 import { ExecuteApexSchema, InvokeFlowSchema, RunReportSchema } from "../schemas/tools.js";
@@ -60,10 +61,7 @@ Use this to discover Flow API names before calling sf_invoke_flow.`,
     async () => {
       const flows = await client.listFlows();
       const result = { count: flows.length, flows };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -87,10 +85,7 @@ Example:
     },
     async ({ flow_api_name, inputs }) => {
       const result = await client.invokeFlow(flow_api_name, inputs);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -112,10 +107,7 @@ Use report IDs from here to call sf_run_report.`,
     async () => {
       const reports = await client.listReports();
       const result = { count: reports.length, reports };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -137,10 +129,7 @@ Example: { report_id: "00O1a00000XYZ" }`,
     },
     async ({ report_id }) => {
       const result = await client.runReport(report_id);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -161,10 +150,7 @@ Useful for: checking API headroom, storage usage, async Apex queue limits.`,
     },
     async () => {
       const result = await client.getOrgLimits();
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 
@@ -183,10 +169,7 @@ Returns: User record with id, name, email, role, profile, and org details.`,
     },
     async () => {
       const result = await client.getCurrentUser();
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result,
-      };
+      return ok(result);
     }
   );
 }
